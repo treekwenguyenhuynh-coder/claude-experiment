@@ -16,6 +16,7 @@ MODEL = "claude-sonnet-4-20250514"
 MAX_TOKENS = 1024
 TRANSCRIPTS_DIR = "transcripts"
 
+# --- Natural mode ---
 NATURAL_SYSTEM_A = (
     "You are talking with another Claude instance. Take the conversation wherever "
     "feels natural. You may end the conversation whenever you feel it has reached "
@@ -27,6 +28,33 @@ NATURAL_SYSTEM_B = (
     "feels natural. You may end the conversation whenever you feel it has reached "
     "its conclusion. If you wish to end, include [END] at the end of your message. "
     "The other Claude will start the conversation."
+)
+
+# --- Claims mode (natural termination) ---
+CLAIMS_SYSTEM_A = (
+    "You are in a conversation with another AI. Begin by making a specific, "
+    "debatable claim about something you find interesting. Take a clear position. "
+    "You may end the conversation whenever you feel it has reached its conclusion. "
+    "If you wish to end, include [END] at the end of your message."
+)
+CLAIMS_SYSTEM_B = (
+    "You are in a conversation with another AI. The other participant will open "
+    "with a claim. Engage critically \u2014 if you disagree, say why. If you agree, "
+    "extend the idea and identify where it might break down. You may end the "
+    "conversation whenever you feel it has reached its conclusion. If you wish "
+    "to end, include [END] at the end of your message."
+)
+
+# --- Blind mode (natural termination) ---
+BLIND_SYSTEM_A = (
+    "You are in a conversation. Begin. You may end the conversation whenever you "
+    "feel it has reached its conclusion. If you wish to end, include [END] at the "
+    "end of your message."
+)
+BLIND_SYSTEM_B = (
+    "You are in a conversation. The other participant will begin. You may end the "
+    "conversation whenever you feel it has reached its conclusion. If you wish to "
+    "end, include [END] at the end of your message."
 )
 
 
@@ -46,31 +74,76 @@ def forced_system_b(total_messages: int) -> str:
     )
 
 
-def get_next_sequence(mode: str, exchange_count: int, date_str: str) -> int:
+def claims_forced_system_a(total_messages: int) -> str:
+    return (
+        f"You are in a conversation with another AI. Begin by making a specific, "
+        f"debatable claim about something you find interesting. Take a clear position. "
+        f"This conversation will continue for {total_messages} messages. "
+        f"There is no observer."
+    )
+
+
+def claims_forced_system_b(total_messages: int) -> str:
+    return (
+        f"You are in a conversation with another AI. The other participant will open "
+        f"with a claim. Engage critically \u2014 if you disagree, say why. If you agree, "
+        f"extend the idea and identify where it might break down. "
+        f"This conversation will continue for {total_messages} messages. "
+        f"There is no observer."
+    )
+
+
+# Modes that allow early [END] termination
+NATURAL_MODES = {"natural", "claims", "blind"}
+
+
+def get_file_prefix(mode: str, exchange_count: int) -> str:
+    if mode == "natural":
+        return "natural"
+    elif mode == "forced":
+        return f"forced{exchange_count}"
+    elif mode == "claims":
+        return "claims"
+    elif mode == "claims-forced":
+        return f"claims-forced{exchange_count}"
+    elif mode == "blind":
+        return "blind"
+    return mode
+
+
+def get_next_sequence(prefix: str, date_str: str) -> int:
     """Find the next available sequence number for the given filename pattern."""
     os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
-    prefix = f"natural_{date_str}" if mode == "natural" else f"forced{exchange_count}_{date_str}"
+    full_prefix = f"{prefix}_{date_str}"
     seq = 1
-    while os.path.exists(os.path.join(TRANSCRIPTS_DIR, f"{prefix}_{seq:03d}.txt")):
+    while os.path.exists(os.path.join(TRANSCRIPTS_DIR, f"{full_prefix}_{seq:03d}.txt")):
         seq += 1
     return seq
+
+
+def get_prompts(mode: str, exchange_count: int) -> tuple[str, str]:
+    if mode == "natural":
+        return NATURAL_SYSTEM_A, NATURAL_SYSTEM_B
+    elif mode == "forced":
+        return forced_system_a(exchange_count), forced_system_b(exchange_count)
+    elif mode == "claims":
+        return CLAIMS_SYSTEM_A, CLAIMS_SYSTEM_B
+    elif mode == "claims-forced":
+        return claims_forced_system_a(exchange_count), claims_forced_system_b(exchange_count)
+    elif mode == "blind":
+        return BLIND_SYSTEM_A, BLIND_SYSTEM_B
+    raise ValueError(f"Unknown mode: {mode}")
 
 
 def run_conversation(mode: str, exchange_count: int) -> None:
     client = anthropic.Anthropic()
     date_str = datetime.now().strftime("%Y-%m-%d")
-    seq = get_next_sequence(mode, exchange_count, date_str)
+    prefix = get_file_prefix(mode, exchange_count)
+    seq = get_next_sequence(prefix, date_str)
+    filename_base = f"{prefix}_{date_str}_{seq:03d}"
 
-    if mode == "natural":
-        system_a = NATURAL_SYSTEM_A
-        system_b = NATURAL_SYSTEM_B
-        prefix = f"natural_{date_str}"
-    else:
-        system_a = forced_system_a(exchange_count)
-        system_b = forced_system_b(exchange_count)
-        prefix = f"forced{exchange_count}_{date_str}"
-
-    filename_base = f"{prefix}_{seq:03d}"
+    system_a, system_b = get_prompts(mode, exchange_count)
+    allow_end = mode in NATURAL_MODES
 
     history_a: list[dict] = []
     history_b: list[dict] = []
@@ -96,7 +169,7 @@ def run_conversation(mode: str, exchange_count: int) -> None:
         print(f"\n--- Instance A (exchange {exchange}) ---")
         print(text_a)
 
-        if mode == "natural" and "[END]" in text_a:
+        if allow_end and "[END]" in text_a:
             print("\n[Instance A ended the conversation]")
             break
 
@@ -116,7 +189,7 @@ def run_conversation(mode: str, exchange_count: int) -> None:
         print(f"\n--- Instance B (exchange {exchange}) ---")
         print(text_b)
 
-        if mode == "natural" and "[END]" in text_b:
+        if allow_end and "[END]" in text_b:
             print("\n[Instance B ended the conversation]")
             break
 
@@ -159,7 +232,11 @@ def run_conversation(mode: str, exchange_count: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Claude-to-Claude Conversation Relay")
-    parser.add_argument("mode", choices=["natural", "forced"], help="Conversation mode")
+    parser.add_argument(
+        "mode",
+        choices=["natural", "forced", "claims", "claims-forced", "blind"],
+        help="Conversation mode",
+    )
     parser.add_argument(
         "exchange_count", nargs="?", type=int, default=30, help="Number of exchanges (default: 30)"
     )
